@@ -5,6 +5,8 @@ import { LoginPage } from './pages/Login.js';
 import { WalletPage } from './pages/Wallet.js';
 import { MinePage } from './pages/Mine.js';
 import { SendPage } from './pages/Send.js';
+import { ActivityPage } from './pages/Activity.js';
+import { LedgerPage } from './pages/Ledger.js';
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(loadTheme());
@@ -34,8 +36,8 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/mine" element={<MinePage />} />
             <Route path="/send" element={<SendPage />} />
-            <Route path="/activity" element={<div>(activity placeholder)</div>} />
-            <Route path="/ledger" element={<div>(ledger placeholder)</div>} />
+            <Route path="/activity" element={<ActivityPage />} />
+            <Route path="/ledger" element={<LedgerPage />} />
           </Routes>
         </main>
       </div>
