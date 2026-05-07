@@ -9,6 +9,7 @@ import { challengeRoutes } from './routes/challenge.js';
 import { mintRoutes } from './routes/mint.js';
 import { sendRoutes } from './routes/send.js';
 import { activityRoutes } from './routes/activity.js';
+import { ledgerRoutes } from './routes/ledger.js';
 
 export interface AppConfig {
   sessionSecret: string;
@@ -58,6 +59,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(mintRoutes);
   await app.register(sendRoutes);
   await app.register(activityRoutes);
+  await app.register(ledgerRoutes);
+
+  app.get('/.well-known/rpow-pubkey.pem', async (_req, reply) => {
+    const pubDer = Buffer.concat([
+      Buffer.from('302a300506032b6570032100', 'hex'),
+      Buffer.from(app.config.signingPublicKeyHex, 'hex'),
+    ]);
+    const b64 = pubDer.toString('base64').match(/.{1,64}/g)!.join('\n');
+    const pem = `-----BEGIN PUBLIC KEY-----\n${b64}\n-----END PUBLIC KEY-----\n`;
+    reply.header('content-type', 'application/x-pem-file').send(pem);
+  });
 
   return app;
 }
