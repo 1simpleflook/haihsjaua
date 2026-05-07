@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.next/
+.cache/
+.env
+.env.local
+*.log
+.DS_Store
+.fly/
+.wrangler/
+.vite/
+coverage/
+playwright-report/
+test-results/
