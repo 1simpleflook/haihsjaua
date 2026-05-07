@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { HashRouter, Route, Routes, NavLink } from 'react-router-dom';
 import { applyTheme, loadTheme, nextTheme, type Theme } from './theme.js';
+import { LoginPage } from './pages/Login.js';
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(loadTheme());
@@ -27,7 +28,7 @@ export default function App() {
         <main>
           <Routes>
             <Route path="/" element={<div>(wallet placeholder)</div>} />
-            <Route path="/login" element={<div>(login placeholder)</div>} />
+            <Route path="/login" element={<LoginPage />} />
             <Route path="/mine" element={<div>(mine placeholder)</div>} />
             <Route path="/send" element={<div>(send placeholder)</div>} />
             <Route path="/activity" element={<div>(activity placeholder)</div>} />
