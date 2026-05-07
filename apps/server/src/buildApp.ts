@@ -71,5 +71,15 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     reply.header('content-type', 'application/x-pem-file').send(pem);
   });
 
+  if (process.env.RPOW_TEST_INBOX === 'true') {
+    app.get('/test/last-link/:email', async (req, reply) => {
+      const email = decodeURIComponent((req.params as { email: string }).email).toLowerCase();
+      const last = (app.mailer as any).lastTo?.(email);
+      if (!last) return reply.code(404).send({});
+      const m = (last.text as string).match(/https?:\/\/[^\s]+token=[\w-]+/);
+      return { link: m?.[0] };
+    });
+  }
+
   return app;
 }
