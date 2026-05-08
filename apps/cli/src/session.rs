@@ -10,6 +10,18 @@ pub struct SessionState {
     pub session_cookie: String,
 }
 
+pub fn load_session_from_env(explicit_base_url: Option<&str>) -> Option<SessionState> {
+    let session_cookie = std::env::var("RPOW_SESSION_COOKIE").ok()?;
+    let base_url = explicit_base_url
+        .map(str::to_string)
+        .or_else(|| std::env::var("RPOW_BASE_URL").ok())
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    Some(SessionState {
+        base_url,
+        session_cookie,
+    })
+}
+
 fn config_dir() -> Result<PathBuf> {
     let base = dirs::config_dir().context("could not resolve config directory")?;
     Ok(base.join("rpow"))
@@ -65,5 +77,16 @@ mod tests {
         let round_trip: SessionState = serde_json::from_str(&raw).unwrap();
         assert_eq!(round_trip.base_url, session.base_url);
         assert_eq!(round_trip.session_cookie, session.session_cookie);
+    }
+
+    #[test]
+    fn env_loader_uses_explicit_base_url() {
+        std::env::set_var("RPOW_SESSION_COOKIE", "cookie-value");
+        std::env::set_var("RPOW_BASE_URL", "https://ignored.example");
+        let session = load_session_from_env(Some("https://api.rpow2.com")).unwrap();
+        assert_eq!(session.base_url, "https://api.rpow2.com");
+        assert_eq!(session.session_cookie, "cookie-value");
+        std::env::remove_var("RPOW_SESSION_COOKIE");
+        std::env::remove_var("RPOW_BASE_URL");
     }
 }

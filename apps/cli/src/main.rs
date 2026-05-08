@@ -4,8 +4,13 @@ mod session;
 mod types;
 
 use std::io::{self, Write};
+use std::sync::mpsc;
+use std::thread::sleep;
+use std::thread;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -14,10 +19,11 @@ use uuid::Uuid;
 
 use crate::api::ApiClient;
 use crate::pow::verify_solution;
-use crate::session::{clear_session, load_session, save_session, SessionState};
+use crate::session::{clear_session, load_session, load_session_from_env, save_session, SessionState};
 use crate::types::{MintRequestBody, SendRequestBody};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:8080";
+const RETRY_DELAY_SECONDS: u64 = 5;
 
 #[derive(Debug, Parser)]
 #[command(name = "rpow", version, about = "Rust CLI client for the RPOW server")]
@@ -56,6 +62,8 @@ struct CookieLoginArgs {
 struct MineArgs {
     #[arg(long)]
     once: bool,
+    #[arg(long, default_value_t = 1)]
+    cores: usize,
 }
 
 #[derive(Debug, Args)]
@@ -79,10 +87,10 @@ fn run() -> Result<()> {
         Commands::Login(args) => login(&cli.base_url, args),
         Commands::CookieLogin(args) => cookie_login(&cli.base_url, args),
         Commands::Logout => logout(),
-        Commands::Me => me(),
-        Commands::Mine(args) => mine(args),
-        Commands::Send(args) => send(args),
-        Commands::Activity => activity(),
+        Commands::Me => me(&cli.base_url),
+        Commands::Mine(args) => mine(&cli.base_url, args),
+        Commands::Send(args) => send(&cli.base_url, args),
+        Commands::Activity => activity(&cli.base_url),
         Commands::Ledger => ledger(&cli.base_url),
     }
 }
@@ -149,8 +157,8 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-fn me() -> Result<()> {
-    let client = session_client()?;
+fn me(base_url: &str) -> Result<()> {
+    let client = session_client(base_url)?;
     let me = client.me()?;
     println!("LOGGED IN AS : {}", me.email);
     println!("BALANCE      : {}", me.balance);
@@ -160,8 +168,12 @@ fn me() -> Result<()> {
     Ok(())
 }
 
-fn mine(args: MineArgs) -> Result<()> {
-    let client = session_client()?;
+fn mine(base_url: &str, args: MineArgs) -> Result<()> {
+    if args.cores == 0 {
+        anyhow::bail!("--cores must be at least 1");
+    }
+
+    let client = session_client(base_url)?;
     let running = Arc::new(AtomicBool::new(true));
     let signal = running.clone();
     ctrlc::set_handler(move || {
@@ -171,56 +183,66 @@ fn mine(args: MineArgs) -> Result<()> {
 
     let mut minted = 0u64;
     while running.load(Ordering::SeqCst) {
-        let challenge = client.challenge()?;
-        let prefix = hex::decode(&challenge.nonce_prefix).context("invalid nonce_prefix from server")?;
+        let challenge = match client.challenge() {
+            Ok(challenge) => challenge,
+            Err(err) => {
+                if args.once {
+                    return Err(err);
+                }
+                println!("challenge error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
+                retry_sleep(&running);
+                continue;
+            }
+        };
+        let prefix = match hex::decode(&challenge.nonce_prefix)
+            .context("invalid nonce_prefix from server")
+        {
+            Ok(prefix) => prefix,
+            Err(err) => {
+                if args.once {
+                    return Err(err);
+                }
+                println!("challenge decode error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
+                retry_sleep(&running);
+                continue;
+            }
+        };
         println!(
-            "mining challenge {} at {} bits (expires {})",
-            challenge.challenge_id, challenge.difficulty_bits, challenge.expires_at
+            "mining challenge {} at {} bits (expires {}) with {} core(s)",
+            challenge.challenge_id, challenge.difficulty_bits, challenge.expires_at, args.cores
         );
 
-        let started = Instant::now();
-        let mut nonce = 0u64;
-        let mut last_report = Instant::now();
-        let mut last_reported_second = 0u64;
+        let solved = solve_challenge(&prefix, challenge.difficulty_bits, args.cores, &running);
+        let Some((solution_nonce, hashes, elapsed)) = solved else {
+            println!("mining interrupted");
+            break;
+        };
 
-        while running.load(Ordering::SeqCst) {
-            if verify_solution(&prefix, nonce, challenge.difficulty_bits) {
-                let elapsed = started.elapsed();
-                let response = client.mint(&MintRequestBody {
-                    challenge_id: challenge.challenge_id.clone(),
-                    solution_nonce: nonce.to_string(),
-                })?;
-                minted += 1;
-                let hashes = nonce + 1;
-                let rate = hashes as f64 / elapsed.as_secs_f64().max(0.001);
-                println!(
-                    "minted token {} value={} issued_at={} hashes={} elapsed={:.2}s rate={:.2} H/s",
-                    response.token.id,
-                    response.token.value,
-                    response.token.issued_at,
-                    hashes,
-                    elapsed.as_secs_f64(),
-                    rate
-                );
-                break;
-            }
-
-            nonce = nonce.wrapping_add(1);
-            if last_report.elapsed().as_millis() >= 500 {
-                let elapsed = started.elapsed();
-                let elapsed_secs = elapsed.as_secs();
-                if elapsed_secs > last_reported_second && elapsed_secs % 5 == 0 {
-                    let elapsed_f = elapsed.as_secs_f64();
-                    let rate = nonce as f64 / elapsed_f.max(0.001);
-                    println!(
-                        "progress elapsed={}s hashes={} rate={:.2} H/s",
-                        elapsed_secs, nonce, rate
-                    );
-                    last_reported_second = elapsed_secs;
+        let response = match client.mint(&MintRequestBody {
+            challenge_id: challenge.challenge_id.clone(),
+            solution_nonce: solution_nonce.to_string(),
+        }) {
+            Ok(response) => response,
+            Err(err) => {
+                if args.once {
+                    return Err(err);
                 }
-                last_report = Instant::now();
+                println!("mint error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
+                retry_sleep(&running);
+                continue;
             }
-        }
+        };
+        minted += 1;
+        let rate_mhs = (hashes as f64 / elapsed.as_secs_f64().max(0.001)) / 1_000_000.0;
+        println!(
+            "minted token {} value={} issued_at={} hashes={} elapsed={:.2}s rate={:.2} MH/s",
+            response.token.id,
+            response.token.value,
+            response.token.issued_at,
+            hashes,
+            elapsed.as_secs_f64(),
+            rate_mhs
+        );
 
         if !running.load(Ordering::SeqCst) {
             println!("mining interrupted");
@@ -237,8 +259,8 @@ fn mine(args: MineArgs) -> Result<()> {
     Ok(())
 }
 
-fn send(args: SendArgs) -> Result<()> {
-    let client = session_client()?;
+fn send(base_url: &str, args: SendArgs) -> Result<()> {
+    let client = session_client(base_url)?;
     let response = client.send(&SendRequestBody {
         recipient_email: args.to,
         amount: args.amount,
@@ -261,8 +283,8 @@ fn send(args: SendArgs) -> Result<()> {
     Ok(())
 }
 
-fn activity() -> Result<()> {
-    let client = session_client()?;
+fn activity(base_url: &str) -> Result<()> {
+    let client = session_client(base_url)?;
     let items = client.activity()?;
     if items.is_empty() {
         println!("(no activity yet)");
@@ -294,9 +316,107 @@ fn ledger(base_url: &str) -> Result<()> {
     Ok(())
 }
 
-fn session_client() -> Result<ApiClient> {
-    let session = load_session()?.context("not logged in; run `rpow login --email <email>`")?;
+fn session_client(base_url: &str) -> Result<ApiClient> {
+    let session = load_session_from_env(Some(base_url))
+        .or(load_session()?)
+        .context(
+            "not logged in; run `rpow login --email <email>`, `rpow cookie-login`, or set RPOW_SESSION_COOKIE",
+        )?;
     ApiClient::from_session(session)
+}
+
+fn retry_sleep(running: &AtomicBool) {
+    for _ in 0..RETRY_DELAY_SECONDS {
+        if !running.load(Ordering::SeqCst) {
+            return;
+        }
+        sleep(Duration::from_secs(1));
+    }
+}
+
+fn solve_challenge(
+    prefix: &[u8],
+    difficulty_bits: u32,
+    cores: usize,
+    running: &Arc<AtomicBool>,
+) -> Option<(u64, u64, Duration)> {
+    let started = Instant::now();
+    let total_hashes = Arc::new(AtomicU64::new(0));
+    let solved = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+
+    thread::scope(|scope| {
+        for worker_id in 0..cores {
+            let tx = tx.clone();
+            let prefix = prefix.to_vec();
+            let running = running.clone();
+            let solved = solved.clone();
+            let total_hashes = total_hashes.clone();
+            scope.spawn(move || {
+                let mut nonce = worker_id as u64;
+                let stride = cores as u64;
+                let mut local_hashes = 0u64;
+
+                while running.load(Ordering::Relaxed) && !solved.load(Ordering::Relaxed) {
+                    if verify_solution(&prefix, nonce, difficulty_bits) {
+                        total_hashes.fetch_add(local_hashes + 1, Ordering::Relaxed);
+                        solved.store(true, Ordering::Relaxed);
+                        let _ = tx.send(nonce);
+                        return;
+                    }
+
+                    nonce = nonce.wrapping_add(stride);
+                    local_hashes += 1;
+                    if local_hashes >= 4096 {
+                        total_hashes.fetch_add(local_hashes, Ordering::Relaxed);
+                        local_hashes = 0;
+                    }
+                }
+
+                if local_hashes > 0 {
+                    total_hashes.fetch_add(local_hashes, Ordering::Relaxed);
+                }
+            });
+        }
+
+        drop(tx);
+
+        let mut last_reported_second = 0u64;
+        loop {
+            if !running.load(Ordering::SeqCst) {
+                solved.store(true, Ordering::SeqCst);
+                return None;
+            }
+
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(solution_nonce) => {
+                    let elapsed = started.elapsed();
+                    let hashes = total_hashes.load(Ordering::Relaxed);
+                    return Some((solution_nonce, hashes.max(1), elapsed));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let elapsed = started.elapsed();
+                    let elapsed_secs = elapsed.as_secs();
+                    if elapsed_secs > last_reported_second && elapsed_secs % 5 == 0 {
+                        let hashes = total_hashes.load(Ordering::Relaxed);
+                        let rate_mhs =
+                            (hashes as f64 / elapsed.as_secs_f64().max(0.001)) / 1_000_000.0;
+                        println!(
+                            "progress elapsed={}s hashes={} rate={:.2} MH/s",
+                            elapsed_secs, hashes, rate_mhs
+                        );
+                        last_reported_second = elapsed_secs;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if !running.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    return None;
+                }
+            }
+        }
+    })
 }
 
 fn normalize_cookie_input(input: &str) -> Result<String> {

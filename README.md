@@ -37,6 +37,13 @@ rpow activity
 rpow ledger
 ```
 
+Run command-specific help:
+
+```bash
+rpow help mine
+rpow help send
+```
+
 ### Build
 
 Development build:
@@ -81,6 +88,17 @@ export RPOW_BASE_URL=https://api.rpow2.com
 ./target/release/rpow ledger
 ```
 
+For session bootstrap without local login commands, you can also provide:
+
+```bash
+export RPOW_SESSION_COOKIE=your_rpow_session_value
+```
+
+Auth precedence for authenticated commands:
+
+1. `RPOW_SESSION_COOKIE`
+2. locally saved session file
+
 ### Login methods
 
 The CLI stores the server session locally after a successful login.
@@ -118,6 +136,14 @@ Accepted cookie input formats:
 - `Cookie: rpow_session=...`
 - `Set-Cookie: rpow_session=...; Path=/; HttpOnly`
 
+Environment-variable login:
+
+```bash
+export RPOW_BASE_URL=https://api.rpow2.com
+export RPOW_SESSION_COOKIE=your_rpow_session_value
+./target/release/rpow me
+```
+
 ### Common usage
 
 Check current account:
@@ -144,10 +170,22 @@ Mine continuously:
 ./target/release/rpow --base-url https://api.rpow2.com mine
 ```
 
+Mine continuously on multiple CPU cores:
+
+```bash
+./target/release/rpow --base-url https://api.rpow2.com mine --cores 8
+```
+
 Mine a single token:
 
 ```bash
 ./target/release/rpow --base-url https://api.rpow2.com mine --once
+```
+
+Mine a single token with a specific core count:
+
+```bash
+./target/release/rpow --base-url https://api.rpow2.com mine --once --cores 4
 ```
 
 Send tokens:
@@ -166,7 +204,9 @@ Logout:
 
 - `cargo run` uses the debug profile and is much slower for mining.
 - For realistic mining performance, use the release binary.
-- The current miner is single-threaded.
+- `mine` runs continuously by default. Use `--once` to stop after one successful mint.
+- The miner supports multi-core nonce search via `--cores <N>`.
+- In continuous mode, transient `/challenge` and `/mint` errors are retried automatically after a short delay.
 - If HTTPS requests fail during TLS handshake, check local proxy/VPN/DNS behavior before debugging the CLI.
 
 ## Local dev for server + web
