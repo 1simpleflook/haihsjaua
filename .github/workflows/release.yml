@@ -10,19 +10,19 @@ permissions:
 
 jobs:
   build-and-release:
+    name: Build and release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             archive_suffix: unknown-linux-gnu
-            archive_ext: tar.gz
           - os: macos-latest
             archive_suffix: apple-darwin
-            archive_ext: tar.gz
-    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,12 +35,14 @@ jobs:
 
       - name: Package archive
         shell: bash
+        env:
+          ARCHIVE_SUFFIX: ${{ matrix.archive_suffix }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
           ARCH="$(uname -m)"
           DIST_DIR="dist"
-          PKG_DIR="${DIST_DIR}/rpow-${VERSION}-${ARCH}-${{ matrix.archive_suffix }}"
+          PKG_DIR="${DIST_DIR}/rpow-${VERSION}-${ARCH}-${ARCHIVE_SUFFIX}"
           mkdir -p "${PKG_DIR}"
           cp target/release/rpow "${PKG_DIR}/rpow"
           cp README.md "${PKG_DIR}/README.md"
@@ -53,4 +55,3 @@ jobs:
           files: dist/*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
-
