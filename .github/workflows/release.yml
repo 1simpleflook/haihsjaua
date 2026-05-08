@@ -1,0 +1,56 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive_suffix: unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            archive_suffix: apple-darwin
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        run: cargo test -p rpow-cli
+
+      - name: Build release binary
+        run: cargo build --release -p rpow-cli
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          ARCH="$(uname -m)"
+          DIST_DIR="dist"
+          PKG_DIR="${DIST_DIR}/rpow-${VERSION}-${ARCH}-${{ matrix.archive_suffix }}"
+          mkdir -p "${PKG_DIR}"
+          cp target/release/rpow "${PKG_DIR}/rpow"
+          cp README.md "${PKG_DIR}/README.md"
+          chmod +x "${PKG_DIR}/rpow"
+          tar -czf "${PKG_DIR}.tar.gz" -C "${DIST_DIR}" "$(basename "${PKG_DIR}")"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+

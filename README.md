@@ -58,10 +58,24 @@ Release build:
 cargo build --release -p rpow-cli
 ```
 
+GitHub Release build:
+
+- pushing a tag like `v0.1.0` triggers `.github/workflows/release.yml`
+- GitHub Actions builds the Rust CLI automatically
+- packaged binaries are uploaded to the corresponding GitHub Release
+- you do not need to manually archive and upload the CLI assets after that
+
 Binary locations:
 
 - debug: `./target/debug/rpow`
 - release: `./target/release/rpow`
+
+Create and push a release tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 Show help:
 
