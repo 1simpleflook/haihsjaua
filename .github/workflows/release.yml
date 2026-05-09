@@ -82,3 +82,38 @@ jobs:
           files: "dist/*.tar.gz"
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  release-windows:
+    name: Release Windows
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        run: cargo test -p rpow-cli
+
+      - name: Build release binary
+        run: cargo build --release -p rpow-cli
+
+      - name: Package archive
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF_NAME
+          $DIST_DIR = "dist"
+          $PKG_NAME = "rpow-$VERSION-x86_64-pc-windows-msvc"
+          $PKG_DIR = "$DIST_DIR/$PKG_NAME"
+          New-Item -ItemType Directory -Force -Path $PKG_DIR
+          Copy-Item "target/release/rpow.exe" -Destination "$PKG_DIR/rpow.exe"
+          Copy-Item "README.md" -Destination "$PKG_DIR/README.md"
+          Compress-Archive -Path "$PKG_DIR/*" -DestinationPath "$DIST_DIR/$PKG_NAME.zip"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "dist/*.zip"
+          generate_release_notes: true
+          fail_on_unmatched_files: true
