@@ -5,11 +5,10 @@ mod types;
 
 use std::io::{self, Write};
 use std::sync::mpsc;
-use std::thread::sleep;
-use std::thread;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -74,30 +73,31 @@ struct SendArgs {
     amount: String,
 }
 
-fn main() {
-    if let Err(err) = run() {
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run().await {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Login(args) => login(&cli.base_url, args),
-        Commands::CookieLogin(args) => cookie_login(&cli.base_url, args),
-        Commands::Logout => logout(),
-        Commands::Me => me(&cli.base_url),
-        Commands::Mine(args) => mine(&cli.base_url, args),
-        Commands::Send(args) => send(&cli.base_url, args),
-        Commands::Activity => activity(&cli.base_url),
-        Commands::Ledger => ledger(&cli.base_url),
+        Commands::Login(args) => login(&cli.base_url, args).await,
+        Commands::CookieLogin(args) => cookie_login(&cli.base_url, args).await,
+        Commands::Logout => logout().await,
+        Commands::Me => me(&cli.base_url).await,
+        Commands::Mine(args) => mine(&cli.base_url, args).await,
+        Commands::Send(args) => send(&cli.base_url, args).await,
+        Commands::Activity => activity(&cli.base_url).await,
+        Commands::Ledger => ledger(&cli.base_url).await,
     }
 }
 
-fn login(base_url: &str, args: LoginArgs) -> Result<()> {
+async fn login(base_url: &str, args: LoginArgs) -> Result<()> {
     let client = ApiClient::new(base_url.to_string(), None)?;
-    let response = client.auth_request(&args.email)?;
+    let response = client.auth_request(&args.email).await?;
     if !response.ok {
         anyhow::bail!("server did not accept auth request");
     }
@@ -112,7 +112,7 @@ fn login(base_url: &str, args: LoginArgs) -> Result<()> {
     io::stdin()
         .read_line(&mut input)
         .context("failed to read magic link from stdin")?;
-    let session_cookie = client.verify_magic_link(input.trim())?;
+    let session_cookie = client.verify_magic_link(input.trim()).await?;
     save_session(&SessionState {
         base_url: client.base_url().to_string(),
         session_cookie,
@@ -121,7 +121,7 @@ fn login(base_url: &str, args: LoginArgs) -> Result<()> {
     Ok(())
 }
 
-fn cookie_login(base_url: &str, args: CookieLoginArgs) -> Result<()> {
+async fn cookie_login(base_url: &str, args: CookieLoginArgs) -> Result<()> {
     let cookie_input = match args.cookie {
         Some(value) => value,
         None => {
@@ -138,7 +138,7 @@ fn cookie_login(base_url: &str, args: CookieLoginArgs) -> Result<()> {
 
     let session_cookie = normalize_cookie_input(&cookie_input)?;
     let client = ApiClient::new(base_url.to_string(), Some(session_cookie.clone()))?;
-    let me = client.me().context("cookie validation failed")?;
+    let me = client.me().await.context("cookie validation failed")?;
     save_session(&SessionState {
         base_url: client.base_url().to_string(),
         session_cookie,
@@ -147,19 +147,19 @@ fn cookie_login(base_url: &str, args: CookieLoginArgs) -> Result<()> {
     Ok(())
 }
 
-fn logout() -> Result<()> {
+async fn logout() -> Result<()> {
     if let Some(session) = load_session()? {
         let client = ApiClient::from_session(session)?;
-        let _ = client.logout();
+        let _ = client.logout().await;
     }
     clear_session()?;
     println!("logged out");
     Ok(())
 }
 
-fn me(base_url: &str) -> Result<()> {
+async fn me(base_url: &str) -> Result<()> {
     let client = session_client(base_url)?;
-    let me = client.me()?;
+    let me = client.me().await?;
     println!("LOGGED IN AS : {}", me.email());
     println!("BALANCE      : {}", me.balance_display());
     println!("MINTED       : {}", me.minted_display());
@@ -177,7 +177,7 @@ fn me(base_url: &str) -> Result<()> {
     Ok(())
 }
 
-fn mine(base_url: &str, args: MineArgs) -> Result<()> {
+async fn mine(base_url: &str, args: MineArgs) -> Result<()> {
     if args.cores == 0 {
         anyhow::bail!("--cores must be at least 1");
     }
@@ -192,14 +192,14 @@ fn mine(base_url: &str, args: MineArgs) -> Result<()> {
 
     let mut minted = 0u64;
     while running.load(Ordering::SeqCst) {
-        let challenge = match client.challenge() {
+        let challenge = match client.challenge().await {
             Ok(challenge) => challenge,
             Err(err) => {
                 if args.once {
                     return Err(err);
                 }
                 println!("challenge error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
-                retry_sleep(&running);
+                retry_sleep(&running).await;
                 continue;
             }
         };
@@ -212,7 +212,7 @@ fn mine(base_url: &str, args: MineArgs) -> Result<()> {
                     return Err(err);
                 }
                 println!("challenge decode error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
-                retry_sleep(&running);
+                retry_sleep(&running).await;
                 continue;
             }
         };
@@ -221,23 +221,36 @@ fn mine(base_url: &str, args: MineArgs) -> Result<()> {
             challenge.challenge_id, challenge.difficulty_bits, challenge.expires_at, args.cores
         );
 
-        let solved = solve_challenge(&prefix, challenge.difficulty_bits, args.cores, &running);
+        // solve_challenge is CPU-bound and blocking → spawn_blocking
+        let prefix_clone = prefix.clone();
+        let difficulty = challenge.difficulty_bits;
+        let cores = args.cores;
+        let running_clone = running.clone();
+        let solved = tokio::task::spawn_blocking(move || {
+            solve_challenge(&prefix_clone, difficulty, cores, &running_clone)
+        })
+        .await
+        .context("solver thread panicked")?;
+
         let Some((solution_nonce, hashes, elapsed)) = solved else {
             println!("mining interrupted");
             break;
         };
 
-        let response = match client.mint(&MintRequestBody {
-            challenge_id: challenge.challenge_id.clone(),
-            solution_nonce: solution_nonce.to_string(),
-        }) {
+        let response = match client
+            .mint(&MintRequestBody {
+                challenge_id: challenge.challenge_id.clone(),
+                solution_nonce: solution_nonce.to_string(),
+            })
+            .await
+        {
             Ok(response) => response,
             Err(err) => {
                 if args.once {
                     return Err(err);
                 }
                 println!("mint error: {err}. retrying in {RETRY_DELAY_SECONDS}s");
-                retry_sleep(&running);
+                retry_sleep(&running).await;
                 continue;
             }
         };
@@ -268,13 +281,15 @@ fn mine(base_url: &str, args: MineArgs) -> Result<()> {
     Ok(())
 }
 
-fn send(base_url: &str, args: SendArgs) -> Result<()> {
+async fn send(base_url: &str, args: SendArgs) -> Result<()> {
     let client = session_client(base_url)?;
-    let response = client.send(&SendRequestBody::from_rpow_amount(
-        args.to,
-        &args.amount,
-        Uuid::new_v4().to_string(),
-    )?)?;
+    let response = client
+        .send(&SendRequestBody::from_rpow_amount(
+            args.to,
+            &args.amount,
+            Uuid::new_v4().to_string(),
+        )?)
+        .await?;
     if !response.ok() {
         anyhow::bail!("server reported send failure");
     }
@@ -296,9 +311,9 @@ fn send(base_url: &str, args: SendArgs) -> Result<()> {
     Ok(())
 }
 
-fn activity(base_url: &str) -> Result<()> {
+async fn activity(base_url: &str) -> Result<()> {
     let client = session_client(base_url)?;
-    let items = client.activity()?;
+    let items = client.activity().await?;
     if items.is_empty() {
         println!("(no activity yet)");
         return Ok(());
@@ -319,9 +334,9 @@ fn activity(base_url: &str) -> Result<()> {
     Ok(())
 }
 
-fn ledger(base_url: &str) -> Result<()> {
+async fn ledger(base_url: &str) -> Result<()> {
     let client = ApiClient::new(base_url.to_string(), None)?;
-    let ledger = client.ledger()?;
+    let ledger = client.ledger().await?;
     println!("TOTAL MINTED       : {}", ledger.total_minted_display());
     println!("TOTAL TRANSFERRED  : {}", ledger.total_transferred_display());
     println!("CIRCULATING SUPPLY : {}", ledger.circulating_supply_display());
@@ -366,12 +381,12 @@ fn session_client(base_url: &str) -> Result<ApiClient> {
     ApiClient::from_session(session)
 }
 
-fn retry_sleep(running: &AtomicBool) {
+async fn retry_sleep(running: &AtomicBool) {
     for _ in 0..RETRY_DELAY_SECONDS {
         if !running.load(Ordering::SeqCst) {
             return;
         }
-        sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -450,9 +465,6 @@ fn solve_challenge(
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if !running.load(Ordering::SeqCst) {
-                        return None;
-                    }
                     return None;
                 }
             }
