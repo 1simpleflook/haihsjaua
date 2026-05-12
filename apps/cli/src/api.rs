@@ -1,7 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{COOKIE, SET_COOKIE};
-use reqwest::redirect::Policy;
+use rquest::header::{COOKIE, SET_COOKIE};
+use rquest::redirect::Policy;
+
+use rquest::{Client, Response};
+use rquest_util::Emulation;
 use url::Url;
 
 use crate::session::SessionState;
@@ -19,6 +21,7 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(base_url: String, session_cookie: Option<String>) -> Result<Self> {
         let client = Client::builder()
+            .emulation(Emulation::Chrome133)
             .redirect(Policy::none())
             .build()
             .context("failed to build http client")?;
@@ -37,70 +40,80 @@ impl ApiClient {
         &self.base_url
     }
 
-    pub fn auth_request(&self, email: &str) -> Result<AuthRequestResponse> {
+    pub async fn auth_request(&self, email: &str) -> Result<AuthRequestResponse> {
         self.post_json("/auth/request", &serde_json::json!({ "email": email }))
+            .await
     }
 
-    pub fn verify_magic_link(&self, link: &str) -> Result<String> {
+    pub async fn verify_magic_link(&self, link: &str) -> Result<String> {
         let url = parse_magic_link(&self.base_url, link)?;
-        let response = self.client.get(url).send().context("failed to verify magic link")?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("failed to verify magic link")?;
         if !response.status().is_redirection() {
-            return parse_error_response(response);
+            return parse_error_response(response).await;
         }
         let cookie = extract_session_cookie(&response)
             .context("magic link did not return an rpow_session cookie")?;
         Ok(cookie)
     }
 
-    pub fn logout(&self) -> Result<()> {
-        let _ignored: serde_json::Value = self.post_json("/auth/logout", &serde_json::json!({}))?;
+    pub async fn logout(&self) -> Result<()> {
+        let _ignored: serde_json::Value =
+            self.post_json("/auth/logout", &serde_json::json!({})).await?;
         Ok(())
     }
 
-    pub fn me(&self) -> Result<MeResponse> {
-        self.get_json_auth("/me")
+    pub async fn me(&self) -> Result<MeResponse> {
+        self.get_json_auth("/me").await
     }
 
-    pub fn challenge(&self) -> Result<ChallengeResponse> {
+    pub async fn challenge(&self) -> Result<ChallengeResponse> {
         self.post_json_auth("/challenge", &serde_json::json!({}))
+            .await
     }
 
-    pub fn mint(&self, body: &MintRequestBody) -> Result<MintResponse> {
-        self.post_json_auth("/mint", body)
+    pub async fn mint(&self, body: &MintRequestBody) -> Result<MintResponse> {
+        self.post_json_auth("/mint", body).await
     }
 
-    pub fn send(&self, body: &SendRequestBody) -> Result<SendResponse> {
-        self.post_json_auth("/send", body)
+    pub async fn send(&self, body: &SendRequestBody) -> Result<SendResponse> {
+        self.post_json_auth("/send", body).await
     }
 
-    pub fn activity(&self) -> Result<Vec<ActivityEntry>> {
-        self.get_json_auth("/activity")
+    pub async fn activity(&self) -> Result<Vec<ActivityEntry>> {
+        self.get_json_auth("/activity").await
     }
 
-    pub fn ledger(&self) -> Result<LedgerResponse> {
-        self.get_json("/ledger")
+    pub async fn ledger(&self) -> Result<LedgerResponse> {
+        self.get_json("/ledger").await
     }
 
-    fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let response = self
             .client
             .get(self.url(path)?)
             .send()
+            .await
             .with_context(|| format!("GET {} failed", path))?;
-        parse_json_response(response)
+        parse_json_response(response).await
     }
 
-    fn get_json_auth<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    async fn get_json_auth<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let response = self
             .client
             .get(self.url(path)?)
             .header(COOKIE, self.cookie_header()?)
             .send()
+            .await
             .with_context(|| format!("GET {} failed", path))?;
-        parse_json_response(response)
+        parse_json_response(response).await
     }
 
-    fn post_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+    async fn post_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
         &self,
         path: &str,
         body: &B,
@@ -110,11 +123,12 @@ impl ApiClient {
             .post(self.url(path)?)
             .json(body)
             .send()
+            .await
             .with_context(|| format!("POST {} failed", path))?;
-        parse_json_response(response)
+        parse_json_response(response).await
     }
 
-    fn post_json_auth<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+    async fn post_json_auth<T: serde::de::DeserializeOwned, B: serde::Serialize>(
         &self,
         path: &str,
         body: &B,
@@ -125,8 +139,9 @@ impl ApiClient {
             .header(COOKIE, self.cookie_header()?)
             .json(body)
             .send()
+            .await
             .with_context(|| format!("POST {} failed", path))?;
-        parse_json_response(response)
+        parse_json_response(response).await
     }
 
     fn cookie_header(&self) -> Result<String> {
@@ -151,16 +166,16 @@ fn normalize_base_url(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
-fn parse_json_response<T: serde::de::DeserializeOwned>(response: Response) -> Result<T> {
+async fn parse_json_response<T: serde::de::DeserializeOwned>(response: Response) -> Result<T> {
     if response.status().is_success() {
-        return response.json().context("failed to decode json response");
+        return response.json().await.context("failed to decode json response");
     }
-    parse_error_response(response)
+    parse_error_response(response).await
 }
 
-fn parse_error_response<T>(response: Response) -> Result<T> {
+async fn parse_error_response<T>(response: Response) -> Result<T> {
     let status = response.status();
-    let text = response.text().unwrap_or_default();
+    let text = response.text().await.unwrap_or_default();
     if let Ok(api_error) = serde_json::from_str::<ApiError>(&text) {
         let mut message = format!("{}: {}", api_error.error, api_error.message);
         if let Some(retry_after) = api_error.retry_after {
@@ -218,8 +233,9 @@ mod tests {
 
     #[test]
     fn rejects_wrong_host() {
-        let err = parse_magic_link("http://localhost:8080", "http://example.com/auth/verify?token=abc")
-            .unwrap_err();
+        let err =
+            parse_magic_link("http://localhost:8080", "http://example.com/auth/verify?token=abc")
+                .unwrap_err();
         assert!(err.to_string().contains("host does not match"));
     }
 }
